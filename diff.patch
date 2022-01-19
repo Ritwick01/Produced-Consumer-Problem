@@ -1,0 +1,125 @@
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index 18b5500ea..faee3bcd1 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -370,7 +370,8 @@
+ 446	common	landlock_restrict_self	sys_landlock_restrict_self
+ 447	common	memfd_secret		sys_memfd_secret
+ 448	common	process_mrelease	sys_process_mrelease
+-
++449 common  reader              sys_reader
++450 common  writer              sys_writer
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+ # in x32 as compared to native x86_64.  These syscalls have numbers 512-547.
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 8fdac0d90..64344f313 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -61,6 +61,7 @@
+ #include <linux/rcupdate.h>
+ #include <linux/uidgid.h>
+ #include <linux/cred.h>
++#include <linux/semaphore.h>
+ 
+ #include <linux/nospec.h>
+ 
+@@ -71,7 +72,6 @@
+ #include <linux/uaccess.h>
+ #include <asm/io.h>
+ #include <asm/unistd.h>
+-
+ #include "uid16.h"
+ 
+ #ifndef SET_UNALIGN_CTL
+@@ -200,6 +200,90 @@ static int set_one_prio(struct task_struct *p, int niceval, int error)
+ 	return error;
+ }
+ 
++struct semaphore lock, empty, full;
++unsigned long long *cq = NULL;
++int front = -1;
++int rear = -1;
++int size = 5;
++
++SYSCALL_DEFINE1(reader, unsigned long long*, n) 
++{
++	unsigned long long val;
++	if (cq == NULL) 
++	{
++		cq = (unsigned long long*) kmalloc(size * sizeof(unsigned long long), GFP_KERNEL);
++		sema_init(&empty, size); 
++		sema_init(&full, 0);	
++		sema_init(&lock, 1);	
++		front = -1;
++		rear = -1;
++	}
++
++	if (front == -1)
++	{
++		front = -1;
++		rear = -1;
++		return 1;
++	}
++	else 
++	{
++		down(&full);
++		down(&lock);
++		val = cq[front];
++		if (front == rear)
++		{
++			front = -1;
++			rear = -1;
++		}
++		else 
++		{
++			front = (front + 1) % size;
++		}
++		up(&lock);
++		up(&empty);
++		printk("Consumed: %llu\n", val);
++		if (copy_to_user(n, &val, sizeof(val)))
++		{
++			return -EFAULT;
++		}
++
++		return 0;
++	}
++
++}
++
++SYSCALL_DEFINE1(writer, unsigned long long, n) 
++{
++	if ((front == rear + 1) || (front == 0 && rear == size - 1)) 
++	{
++		return 1;
++	}
++	else 
++	{
++		if (cq == NULL) 
++		{
++			cq = (unsigned long long *) kmalloc(size * sizeof(unsigned long long), GFP_KERNEL);
++			sema_init(&empty, size); 
++			sema_init(&full, 0);	
++			sema_init(&lock, 1);	
++			front = -1;
++			rear = -1;
++		}
++
++		down(&empty);
++		down(&lock);
++		if (front == -1) {
++			front = 0;
++		}
++		rear = (rear + 1) % size;
++		cq[rear] = n;
++		up(&lock);
++		up(&full);
++		printk("Produced: %llu\n", n);
++		return 0;
++	}
++}
++
+ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
+ {
+ 	struct task_struct *g, *p;
